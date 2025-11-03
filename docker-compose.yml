@@ -1,0 +1,53 @@
+﻿services:
+  startupapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Docker
+      - DatabaseProvider=PostgreSQL
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=StartupApiDb;Username=postgres;Password=postgres123!
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - startupapi-network
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=StartupApiDb
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres123!
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - startupapi-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@startupapi.com
+      - PGADMIN_DEFAULT_PASSWORD=admin123!
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - startupapi-network
+
+volumes:
+  postgres-data:
+
+networks:
+  startupapi-network:
+    driver: bridge
