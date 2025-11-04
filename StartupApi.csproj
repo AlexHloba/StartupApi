@@ -27,6 +27,10 @@
 		<PackageReference Include="AspNetCore.HealthChecks.Redis" Version="8.0.0" />
 		<PackageReference Include="AspNetCore.HealthChecks.UI.Client" Version="8.0.0" />
 		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="8.0.0" />
+		<!-- Добавляем недостающие пакеты -->
+		<PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="8.0.0" />
+		<PackageReference Include="StackExchange.Redis" Version="2.7.33" />
+		<PackageReference Include="Microsoft.AspNetCore.RateLimiting" Version="8.0.0" />
 	</ItemGroup>
 
 </Project>
