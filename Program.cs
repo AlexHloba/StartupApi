@@ -4,6 +4,10 @@ using StartupApi.Middlewares;
 using Microsoft.EntityFrameworkCore;
 using FluentValidation;
 using System.Reflection;
+using StackExchange.Redis;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -44,9 +48,62 @@ else
         options.UseNpgsql(connectionString));
 }
 
+// Redis Configuration
+var redisConnectionString = builder.Configuration["Redis:ConnectionString"] ?? "redis:6379";
+Console.WriteLine($"Using Redis Connection: {redisConnectionString}");
+
+try
+{
+    // Add Redis Connection
+    builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+        ConnectionMultiplexer.Connect(redisConnectionString));
+
+    // Add Distributed Cache
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = redisConnectionString;
+        options.InstanceName = "StartupApi_";
+    });
+
+    Console.WriteLine("Redis services configured successfully");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"Warning: Redis configuration failed: {ex.Message}");
+    // Continue without Redis for development
+}
+
 // Application Services
-builder.Services.AddApplicationServices();
-builder.Services.AddJwtAuthentication(builder.Configuration);
+builder.Services.AddApplicationServices(builder.Configuration);
+
+// JWT Authentication
+var jwtSettings = builder.Configuration.GetSection("JwtSettings");
+var secretKey = jwtSettings["SecretKey"];
+
+if (string.IsNullOrEmpty(secretKey))
+{
+    throw new ArgumentNullException("JWT SecretKey is not configured");
+}
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = Microsoft.AspNetCore.Authentication.JwtBearer.JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = Microsoft.AspNetCore.Authentication.JwtBearer.JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = jwtSettings["Issuer"],
+        ValidAudience = jwtSettings["Audience"],
+        IssuerSigningKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(
+            System.Text.Encoding.UTF8.GetBytes(secretKey))
+    };
+});
 
 // AutoMapper
 builder.Services.AddAutoMapper(Assembly.GetExecutingAssembly());
@@ -58,9 +115,42 @@ builder.Services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
 builder.Services.AddMediatR(cfg =>
     cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
 
+// Rate Limiting
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("Fixed", opt =>
+    {
+        opt.PermitLimit = 100;
+        opt.Window = TimeSpan.FromMinutes(1);
+        opt.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        opt.QueueLimit = 2;
+    });
+});
+
 // Health Checks
-builder.Services.AddHealthChecks()
-    .AddDbContextCheck<ApplicationDbContext>();
+var healthChecks = builder.Services.AddHealthChecks();
+
+if (databaseProvider == "SqlServer")
+{
+    healthChecks.AddSqlServer(connectionString, name: "sqlserver");
+}
+else
+{
+    healthChecks.AddNpgSql(connectionString, name: "postgres");
+}
+
+// Add Redis health check if configured
+try
+{
+    healthChecks.AddRedis(redisConnectionString, name: "redis");
+    Console.WriteLine("Redis health check configured");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"Warning: Redis health check not configured: {ex.Message}");
+}
+
+healthChecks.AddDbContextCheck<ApplicationDbContext>(name: "database");
 
 var app = builder.Build();
 
@@ -75,9 +165,14 @@ if (app.Environment.IsDevelopment() || app.Environment.EnvironmentName == "Docke
     });
 }
 
+// Custom Middlewares
 app.UseMiddleware<ExceptionHandlingMiddleware>();
+app.UseMiddleware<RateLimitingMiddleware>();
 
 app.UseHttpsRedirection();
+
+// Rate Limiter must be after UseHttpsRedirection and before other middlewares
+app.UseRateLimiter();
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -131,6 +226,22 @@ async Task InitializeDatabaseAsync(WebApplication webApp)
         Console.WriteLine("Creating database and applying migrations...");
         await context.Database.EnsureCreatedAsync();
         Console.WriteLine("Database ready!");
+
+        // Test Redis connection
+        try
+        {
+            var redis = services.GetService<IConnectionMultiplexer>();
+            if (redis != null)
+            {
+                var db = redis.GetDatabase();
+                await db.PingAsync();
+                Console.WriteLine("Redis connection successful!");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: Redis connection failed: {ex.Message}");
+        }
 
     }
     catch (Exception ex)

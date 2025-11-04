@@ -1,52 +1,42 @@
-﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
+﻿using StackExchange.Redis;
+using StartupApi.Data;
 using StartupApi.Repositories;
 using StartupApi.Services;
-using System.Text;
-
 namespace StartupApi.Configuration;
 
 public static class ServiceExtensions
 {
-    public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+    public static IServiceCollection AddApplicationServices(this IServiceCollection services, IConfiguration configuration)
     {
-        // Repositories
-        services.AddScoped<IUserRepository, UserRepository>();
+        // Redis Configuration
+        var redisConnectionString = configuration["Redis:ConnectionString"] ?? "redis:6379";
 
-        // Services
+        try
+        {
+            // Add Redis Connection if not already added
+            services.AddSingleton<IConnectionMultiplexer>(sp =>
+                ConnectionMultiplexer.Connect(redisConnectionString));
+
+            // Services
+            services.AddScoped<ICacheService, RedisCacheService>();
+        }
+        catch (Exception ex)
+        {
+            // Log error but continue without Redis
+            Console.WriteLine($"Redis initialization failed: {ex.Message}");
+        }
+
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<ITokenService, TokenService>();
 
-        return services;
-    }
-
-    public static IServiceCollection AddJwtAuthentication(this IServiceCollection services, IConfiguration configuration)
-    {
-        var jwtSettings = configuration.GetSection("JwtSettings");
-        var secretKey = jwtSettings["SecretKey"];
-
-        if (string.IsNullOrEmpty(secretKey))
+        // Repositories - decorated with caching
+        services.AddScoped<IUserRepository>(provider =>
         {
-            throw new ArgumentNullException("JWT SecretKey is not configured");
-        }
+            var context = provider.GetRequiredService<ApplicationDbContext>();
+            var cacheService = provider.GetRequiredService<ICacheService>();
+            var logger = provider.GetRequiredService<ILogger<CachedUserRepository>>();
 
-        services.AddAuthentication(options =>
-        {
-            options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-            options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-        })
-        .AddJwtBearer(options =>
-        {
-            options.TokenValidationParameters = new TokenValidationParameters
-            {
-                ValidateIssuer = true,
-                ValidateAudience = true,
-                ValidateLifetime = true,
-                ValidateIssuerSigningKey = true,
-                ValidIssuer = jwtSettings["Issuer"],
-                ValidAudience = jwtSettings["Audience"],
-                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey))
-            };
+            return new CachedUserRepository(context, cacheService, logger);
         });
 
         return services;
